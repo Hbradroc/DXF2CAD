@@ -1,4 +1,4 @@
-# DXF2CAD — Professional 3D Format Converter
+# DXF2CAD
 
 A lightweight, pure-Python command-line tool for converting **3D DXF files** to industry-standard CAD formats (**STL**, **STEP**, **IGES**). Ideal for CAD workflows, 3D printing preparation, and multi-tool design ecosystems.
 
