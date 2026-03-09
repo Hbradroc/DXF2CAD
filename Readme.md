@@ -14,7 +14,7 @@ A pure-Python command-line tool that converts **3D DXF files** into industry-sta
 | `POLYLINE` (POLYMESH) | Parametric M×N surface grids |
 | `INSERT` | Block references — recursively expanded |
 
-> **Not supported:** `3DSOLID`, `BODY`, `REGION` — these contain embedded ACIS/SAT blobs that require a full CAD kernel to decode. Export those directly from your CAD application.
+> **Not supported:** `3DSOLID`, `BODY`, `REGION` — these contain embedded ACIS/SAT blobs that require a full CAD kernel to decode.
 
 ---
 
@@ -23,19 +23,18 @@ A pure-Python command-line tool that converts **3D DXF files** into industry-sta
 ### STL (`.stl`)
 - Binary triangle mesh
 - Best for **3D printing** and mesh viewers
-- Widely supported (Meshmixer, Blender, PrusaSlicer, etc.)
+
 
 ### STEP (`.stp`)
-- ISO 10303 AP214 (`AUTOMOTIVE_DESIGN`) — pure-Python writer, no extra library
+- ISO 10303 AP214 (`AUTOMOTIVE_DESIGN`) 
 - Each triangle becomes an `ADVANCED_FACE` on a `PLANE` surface inside an `OPEN_SHELL`
-- Best for **NX, CATIA, SolidWorks, FreeCAD, Fusion 360**
-- Import in NX: **File → Import → STEP**
+
 
 ### IGES (`.igs`)
-- IGES 5.3 — pure-Python writer, no extra library
+- IGES 5.3 
 - Each triangle becomes an Entity 144 **Trimmed Parametric Surface**
 - Widely supported by all major CAD packages
-- Import in NX: **File → Import → IGES**
+
 
 ---
 
