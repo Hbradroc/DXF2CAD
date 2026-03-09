@@ -1,6 +1,6 @@
 # DXF2CAD
 
-A pure-Python command-line tool that converts **3D DXF files** into industry-standard CAD formats — **STL**, **STEP**, and **IGES** — with zero paid software required.
+A pure-Python command-line tool that converts **3D DXF files** into industry-standard CAD formats — **STL**, **STEP**, and **IGES** 
 
 ---
 
@@ -113,16 +113,6 @@ Output files are saved next to the input file by default:
 ```
 model.dxf   →   model.igs  /  model.stp  /  model.stl
 ```
-
----
-
-## Importing into NX
-
-| Format | NX Menu Path |
-|---|---|
-| IGES | File → Import → IGES |
-| STEP | File → Import → STEP |
-
 ---
 
 ## Troubleshooting
