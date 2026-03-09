@@ -149,6 +149,7 @@ def extract_geometry(dxf_path: Path):
                 if isinstance(entity, _Polyface):
                     # ---------- PFACE ----------
                     # ezdxf 1.x Polyface exposes .faces() iterator
+                    pf_count = 0
                     for face in entity.faces():
                         face_pts = [v.dxf.location for v in face]
                         if len(face_pts) < 3:
@@ -157,6 +158,9 @@ def extract_geometry(dxf_path: Path):
                         verts.extend(_vec3(p) for p in face_pts)
                         for k in range(1, len(face_pts) - 1):
                             tris.append((base, base + k, base + k + 1))
+                        pf_count += 1
+                    if pf_count > 0:
+                        print(f"      PFACE mesh: extracted {pf_count} faces")
 
                 elif isinstance(entity, _Polymesh):
                     # ---------- POLYMESH ----------
@@ -165,14 +169,56 @@ def extract_geometry(dxf_path: Path):
                     mesh_verts = list(entity.vertices)
                     base = len(verts)
                     verts.extend(_vec3(v.dxf.location) for v in mesh_verts)
+                    pm_count = 0
+                    
+                    # Create faces between rows (cylindrical side)
                     for i in range(m - 1):
-                        for j in range(n - 1):
+                        for j in range(n):  # Include n to wrap around!
                             a = base + i * n + j
-                            b = base + i * n + (j + 1)
-                            c = base + (i + 1) * n + (j + 1)
+                            b = base + i * n + ((j + 1) % n)
+                            c = base + (i + 1) * n + ((j + 1) % n)
                             d = base + (i + 1) * n + j
                             tris.append((a, b, c))
                             tris.append((a, c, d))
+                            pm_count += 1
+                    
+                    # Create end cap at row 0 (fan triangulation from first vertex)
+                    # Centers at vertex 0, radiates to the ring (skip edges that would create degeneracy)
+                    if m == 2 and n >= 4:  # Only for closed rings of 4+ vertices
+                        center = base + 0
+                        # Create non-degenerate triangles: from v[1] to v[n-1]
+                        for j in range(1, n - 1):
+                            v0 = base + 0 + j
+                            v1 = base + 0 + j + 1
+                            tris.append((center, v0, v1))
+                            pm_count += 1
+                        # Create final closing triangle: v[n-1], v[n], center back to v[1]
+                        # This connects the last edge (v[n-1], v[0]) without degeneracy
+                        # by using the "opposite" edge (v[n-1], v[1]) 
+                        if n >= 4:
+                            v_n_minus_1 = base + 0 + (n - 1)
+                            v_1 = base + 0 + 1
+                            tris.append((center, v_n_minus_1, v_1))
+                            pm_count += 1
+                    
+                    # Create end cap at row m-1 (fan triangulation from last vertex)
+                    if m == 2 and n >= 4:  # Only for closed rings of 4+ vertices
+                        center = base + (m - 1) * n
+                        # Create non-degenerate triangles: from v[1] to v[n-1]
+                        for j in range(1, n - 1):
+                            v0 = base + (m - 1) * n + j
+                            v1 = base + (m - 1) * n + j + 1
+                            tris.append((center, v1, v0))  # Reversed winding for outward normal
+                            pm_count += 1
+                        # Create final closing triangle with outward winding
+                        if n >= 4:
+                            v_1 = base + (m - 1) * n + 1
+                            v_n_minus_1 = base + (m - 1) * n + (n - 1)
+                            tris.append((center, v_1, v_n_minus_1))
+                            pm_count += 1
+                    
+                    if pm_count > 0:
+                        print(f"      POLYMESH ({m}×{n}): extracted {pm_count} faces")
 
                 else:
                     # Plain 2D/3D polyline – no surface geometry, skip silently
@@ -196,7 +242,7 @@ def extract_geometry(dxf_path: Path):
             "\n  To include them, export directly to STEP/STL from your CAD tool."
         )
     total_faces = len(tris) + len(quads)
-    print(f"\nExtracted {len(verts):,} vertices, {len(tris):,} triangles, {len(quads):,} quads → {total_faces:,} total faces.")
+    print(f"\nExtracted {len(verts):,} vertices, {len(tris):,} triangles, {len(quads):,} quads -> {total_faces:,} total faces.")
 
     return np.array(verts, dtype=np.float64), tris, quads
 
@@ -322,18 +368,23 @@ def save_stl(vertices: np.ndarray, triangles: list, quads: list, output_path: Pa
         solid.vectors[i] = vertices[[a, b, c]]
 
     solid.save(str(output_path))
-    print(f"STL saved → {output_path}  ({len(all_tris):,} triangles from {len(triangles)} tri + {len(quads)} quad)")
+    print(f"STL saved -> {output_path}  ({len(all_tris):,} triangles from {len(triangles)} tri + {len(quads)} quad)")
 
 
 # ---------------------------------------------------------------------------
 # STEP export  –  pure-Python AP214 writer, no CAD kernel required
 # ---------------------------------------------------------------------------
 
-def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: Path, optimize: bool = True):
+def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: Path, optimize: bool = True, normal_tolerance: float = 1e-10, keep_degenerate: bool = False):
     """
     Write a STEP AP214 (automotive_design) file from triangles and quads.
     Each triangle becomes a 3-sided ADVANCED_FACE, each quad becomes a 4-sided ADVANCED_FACE.
     This preserves the original geometry structure without diagonal splits.
+    
+    Parameters
+    ----------
+    normal_tolerance : float  – minimum normal length to accept a face (default: 1e-10)
+    keep_degenerate : bool  – if True, keep near-degenerate faces (may help with cylinder gaps)
     """
     
     if not triangles and not quads:
@@ -401,11 +452,22 @@ def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: P
         normal = np.cross(v12, v13)
         nlen = float(np.linalg.norm(normal))
         
-        if nlen < 1e-10:
+        if nlen < normal_tolerance:
+            if not keep_degenerate:
+                skipped += 1
+                return None
+            # If keep_degenerate=True, try to fix the normal
+            if nlen < 1e-15:
+                # Truly degenerate, skip
+                skipped += 1
+                return None
+            # Use what we have, even if small
+        
+        if nlen > 0:
+            normal = normal / nlen
+        else:
             skipped += 1
             return None
-        
-        normal = normal / nlen
 
         def fmt(v):
             return f"({v[0]:.8f},{v[1]:.8f},{v[2]:.8f})"
@@ -515,7 +577,7 @@ def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: P
 
     size_mb = output_path.stat().st_size / 1_048_576
     total_exported = len(triangles) + len(quads) - skipped
-    print(f"STEP saved → {output_path}  ({len(face_ids):,} faces ({len(triangles)} tri, {len(quads)} quad), {size_mb:.1f} MB)")
+    print(f"STEP saved -> {output_path}  ({len(face_ids):,} faces ({len(triangles)} tri, {len(quads)} quad), {size_mb:.1f} MB)")
 
 
 
@@ -524,16 +586,15 @@ def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: P
 # IGES export  –  pure-Python IGES 5.3 writer, no CAD kernel required
 # ---------------------------------------------------------------------------
 
-def save_iges(vertices: np.ndarray, triangles: list, quads: list, output_path: Path):
+def save_iges(vertices: np.ndarray, triangles: list, quads: list, output_path: Path, normal_tolerance: float = 1e-10, keep_degenerate: bool = False):
     """
     Write an IGES 5.3 file directly from triangles and quads without diagonal splits.
     Triangles get 3 edges, quads get 4 edges = no splits!
-    Each triangle/quad becomes:
-      Entity 110 (Line) ×3/4  →  edges
-      Entity 102 (Composite Curve)  →  closed boundary loop
-      Entity 108 (Plane)  →  infinite plane through the face
-      Entity 142 (Curve on Parametric Surface)  →  links boundary to plane
-      Entity 144 (Trimmed Parametric Surface)  →  the final trimmed face
+    
+    Parameters
+    ----------
+    normal_tolerance : float  – minimum normal length to accept a face (default: 1e-10)
+    keep_degenerate : bool  – if True, keep near-degenerate faces (may help with cylinder gaps)
     """
     total_faces = len(triangles) + len(quads)
     
@@ -589,10 +650,20 @@ def save_iges(vertices: np.ndarray, triangles: list, quads: list, output_path: P
         p1, p2, p3 = pts[0], pts[1], pts[2]
         normal = np.cross(p2 - p1, p3 - p1)
         nlen = float(np.linalg.norm(normal))
-        if nlen < 1e-10:
+        
+        if nlen < normal_tolerance:
+            if not keep_degenerate:
+                skipped += 1
+                return
+            if nlen < 1e-15:
+                skipped += 1
+                return
+        
+        if nlen > 0:
+            normal = normal / nlen
+        else:
             skipped += 1
             return
-        normal = normal / nlen
 
         # Create edge lines for all polygon edges
         edge_ids = []
@@ -711,7 +782,7 @@ def save_iges(vertices: np.ndarray, triangles: list, quads: list, output_path: P
 
     size_mb = output_path.stat().st_size / 1_048_576
     n_faces = sum(1 for e in _entities if e['etype'] == 144)
-    print(f"IGES saved → {output_path}  ({n_faces:,} trimmed surfaces ({len(triangles)} tri, {len(quads)} quad), {size_mb:.1f} MB)")
+    print(f"IGES saved -> {output_path}  ({n_faces:,} trimmed surfaces ({len(triangles)} tri, {len(quads)} quad), {size_mb:.1f} MB)")
 
 
 
@@ -735,6 +806,10 @@ def main():
                              "Defaults to same folder / stem as input.")
     parser.add_argument("--aggressive", action="store_true",
                         help="Apply aggressive mesh optimization (better for Creo, slower)")
+    parser.add_argument("--normal-tolerance", type=float, default=1e-10,
+                        help="Minimum normal length to accept a face (default: 1e-10). Increase to skip tiny faces.")
+    parser.add_argument("--keep-degenerate", action="store_true",
+                        help="Keep near-degenerate faces (may help with cylinder gaps)")
 
     args = parser.parse_args()
 
@@ -768,10 +843,12 @@ def main():
         save_stl(vertices, triangles, quads, out_base.with_suffix(".stl"))
 
     if args.format in ("step", "all"):
-        save_step(vertices, triangles, quads, out_base.with_suffix(".stp"))
+        save_step(vertices, triangles, quads, out_base.with_suffix(".stp"), 
+                  normal_tolerance=args.normal_tolerance, keep_degenerate=args.keep_degenerate)
 
     if args.format in ("iges", "all"):
-        save_iges(vertices, triangles, quads, out_base.with_suffix(".igs"))
+        save_iges(vertices, triangles, quads, out_base.with_suffix(".igs"), 
+                  normal_tolerance=args.normal_tolerance, keep_degenerate=args.keep_degenerate)
 
     print("\nDone.")
 
