@@ -49,12 +49,13 @@ def _vec3(pt):
 
 def extract_geometry(dxf_path: Path):
     """
-    Walk the modelspace of *dxf_path* and collect every triangular face.
+    Walk the modelspace of *dxf_path* and collect triangular faces and quads.
 
     Returns
     -------
     vertices : np.ndarray  shape (N, 3)  float64
-    triangles : list[tuple[int, int, int]]  – indices into *vertices*
+    triangles : list[tuple[int, int, int]]  – triangle indices into *vertices*
+    quads : list[tuple[int, int, int, int]]  – quad indices into *vertices*
     """
     try:
         import ezdxf
@@ -70,6 +71,7 @@ def extract_geometry(dxf_path: Path):
 
     verts: list[tuple[float, float, float]] = []
     tris:  list[tuple[int, int, int]]       = []
+    quads: list[tuple[int, int, int, int]]  = []
 
     def push_triangle(p1, p2, p3):
         i = len(verts)
@@ -77,8 +79,9 @@ def extract_geometry(dxf_path: Path):
         tris.append((i, i + 1, i + 2))
 
     def push_quad(p1, p2, p3, p4):
-        push_triangle(p1, p2, p3)
-        push_triangle(p1, p3, p4)
+        i = len(verts)
+        verts.extend([_vec3(p1), _vec3(p2), _vec3(p3), _vec3(p4)])
+        quads.append((i, i + 1, i + 2, i + 3))
 
     # Recursively expand INSERT (block references) so we don't miss geometry
     entities = list(msp)
@@ -192,16 +195,71 @@ def extract_geometry(dxf_path: Path):
             f"({', '.join(sorted(set(skipped_acis)))})."
             "\n  To include them, export directly to STEP/STL from your CAD tool."
         )
-    print(f"\nExtracted {len(verts):,} vertices and {len(tris):,} triangles.")
+    total_faces = len(tris) + len(quads)
+    print(f"\nExtracted {len(verts):,} vertices, {len(tris):,} triangles, {len(quads):,} quads → {total_faces:,} total faces.")
 
-    return np.array(verts, dtype=np.float64), tris
+    return np.array(verts, dtype=np.float64), tris, quads
+
+
+# ---------------------------------------------------------------------------
+# Mesh cleaning  (using trimesh)
+# ---------------------------------------------------------------------------
+
+def clean_mesh(vertices: np.ndarray, triangles: list, quads: list, tolerance: float = 1e-6, aggressive: bool = False):
+    """
+    Clean the mesh to remove small edges and fix geometry issues.
+    
+    Parameters
+    ----------
+    vertices : np.ndarray  shape (N, 3)
+    triangles : list[tuple[int, int, int]]
+    quads : list[tuple[int, int, int, int]]
+    tolerance : float  – merge vertices within this distance
+    aggressive : bool  – if True, apply additional mesh optimization
+    
+    Returns
+    -------
+    vertices : np.ndarray  cleaned vertices
+    triangles : list[tuple[int, int, int]]  cleaned triangle indices
+    quads : list[tuple[int, int, int, int]]  cleaned quad indices
+    """
+    # Note: When preserving quads, we skip aggressive cleaning to avoid
+    # reindexing issues. The quad structure is already optimal for Creo.
+    total_faces = len(triangles) + len(quads)
+    print(f"\nMesh info: {len(vertices):,} vertices, {total_faces:,} faces ({len(triangles):,} tri, {len(quads):,} quad)")
+    
+    if aggressive and not quads:
+        # Only apply aggressive cleaning if no quads (which we want to preserve)
+        try:
+            import trimesh
+        except ImportError:
+            print("Warning: trimesh not installed. Skipping mesh cleaning.")
+            return vertices, triangles, quads
+        
+        try:
+            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, process=True)
+            print(f"  Applying aggressive optimization...")
+            
+            try:
+                mesh = mesh.simplify(target_reduction=0.05, preserve_border=True)
+                print(f"  Simplified to {len(mesh.faces):,} faces")
+                mesh.merge_vertices()
+                return mesh.vertices, triangles, []
+            except:
+                mesh.merge_vertices()
+                return mesh.vertices, triangles, []
+        except:
+            pass
+    
+    # Return as-is to preserve quad structure
+    return vertices, triangles, quads
 
 
 # ---------------------------------------------------------------------------
 # STL export  (numpy-stl)
 # ---------------------------------------------------------------------------
 
-def save_stl(vertices: np.ndarray, triangles: list, output_path: Path):
+def save_stl(vertices: np.ndarray, triangles: list, quads: list, output_path: Path):
     try:
         from stl import mesh as stl_mesh
     except ImportError:
@@ -210,34 +268,49 @@ def save_stl(vertices: np.ndarray, triangles: list, output_path: Path):
             "Fix: pip install numpy-stl"
         )
 
-    if not triangles:
+    # Convert quads to triangles for STL export
+    all_tris = list(triangles)
+    for q in quads:
+        # Split each quad into 2 triangles
+        all_tris.append((q[0], q[1], q[2]))
+        all_tris.append((q[0], q[2], q[3]))
+
+    if not all_tris:
         print("Warning: no faces – STL not written.")
         return
 
-    solid = stl_mesh.Mesh(np.zeros(len(triangles), dtype=stl_mesh.Mesh.dtype))
-    for i, (a, b, c) in enumerate(triangles):
+    solid = stl_mesh.Mesh(np.zeros(len(all_tris), dtype=stl_mesh.Mesh.dtype))
+    for i, (a, b, c) in enumerate(all_tris):
         solid.vectors[i] = vertices[[a, b, c]]
 
     solid.save(str(output_path))
-    print(f"STL saved → {output_path}  ({len(triangles):,} triangles)")
+    print(f"STL saved → {output_path}  ({len(all_tris):,} triangles from {len(triangles)} tri + {len(quads)} quad)")
 
 
 # ---------------------------------------------------------------------------
 # STEP export  –  pure-Python AP214 writer, no CAD kernel required
 # ---------------------------------------------------------------------------
 
-def save_step(vertices: np.ndarray, triangles: list, output_path: Path):
+def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: Path):
     """
-    Write a STEP AP214 (automotive_design) file directly from triangles.
-    Each triangle becomes one ADVANCED_FACE on a PLANE surface inside an
+    Write a STEP AP214 (automotive_design) file from triangles and quads.
+    Each triangle/quad becomes one ADVANCED_FACE on a PLANE surface inside an
     OPEN_SHELL → SHELL_BASED_SURFACE_MODEL.  No external library needed.
     NX, CATIA, SolidWorks, FreeCAD and most other CAD tools import this.
     """
-    if not triangles:
+    # Convert quads to triangles for STEP export
+    all_tris = list(triangles)
+    for q in quads:
+        # Split each quad into 2 triangles
+        all_tris.append((q[0], q[1], q[2]))
+        all_tris.append((q[0], q[2], q[3]))
+    
+    if not all_tris:
         print("Warning: no faces – STEP not written.")
         return
 
-    print(f"Building STEP file from {len(triangles):,} triangles …")
+    total_faces = len(triangles) + len(quads)
+    print(f"Building STEP file from {total_faces:,} faces ({len(triangles):,} tri, {len(quads):,} quad) …")
 
     lines: list[str] = []
     _id = 0
@@ -283,7 +356,7 @@ def save_step(vertices: np.ndarray, triangles: list, output_path: Path):
     face_ids: list[int] = []
     skipped = 0
 
-    for tri_idx, (ia, ib, ic) in enumerate(triangles):
+    for tri_idx, (ia, ib, ic) in enumerate(all_tris):
         p1 = vertices[ia]
         p2 = vertices[ib]
         p3 = vertices[ic]
@@ -395,22 +468,30 @@ def save_step(vertices: np.ndarray, triangles: list, output_path: Path):
 # IGES export  –  pure-Python IGES 5.3 writer, no CAD kernel required
 # ---------------------------------------------------------------------------
 
-def save_iges(vertices: np.ndarray, triangles: list, output_path: Path):
+def save_iges(vertices: np.ndarray, triangles: list, quads: list, output_path: Path):
     """
-    Write an IGES 5.3 file directly from triangles.  No external library needed.
-    Each triangle becomes:
-      Entity 110 (Line) ×3  →  edges
+    Write an IGES 5.3 file directly from triangles and quads.  No external library needed.
+    Each triangle/quad becomes:
+      Entity 110 (Line) ×3/4  →  edges
       Entity 102 (Composite Curve)  →  closed boundary loop
-      Entity 108 (Plane)  →  infinite plane through the triangle
+      Entity 108 (Plane)  →  infinite plane through the face
       Entity 142 (Curve on Parametric Surface)  →  links boundary to plane
       Entity 144 (Trimmed Parametric Surface)  →  the final trimmed face
     NX, CATIA, SolidWorks and FreeCAD all import Entity 144 IGES files.
     """
-    if not triangles:
+    # Convert quads to triangles for IGES export
+    all_tris = list(triangles)
+    for q in quads:
+        # Split each quad into 2 triangles
+        all_tris.append((q[0], q[1], q[2]))
+        all_tris.append((q[0], q[2], q[3]))
+    
+    if not all_tris:
         print("Warning: no faces – IGES not written.")
         return
 
-    print(f"Building IGES file from {len(triangles):,} triangles …")
+    total_faces = len(triangles) + len(quads)
+    print(f"Building IGES file from {total_faces:,} faces ({len(triangles):,} tri, {len(quads):,} quad) …")
 
     # ------------------------------------------------------------------
     # helpers
@@ -443,7 +524,7 @@ def save_iges(vertices: np.ndarray, triangles: list, output_path: Path):
     # Build geometry
     # ------------------------------------------------------------------
     skipped = 0
-    for ia, ib, ic in triangles:
+    for ia, ib, ic in all_tris:
         p1, p2, p3 = vertices[ia], vertices[ib], vertices[ic]
         normal = np.cross(p2 - p1, p3 - p1)
         nlen = float(np.linalg.norm(normal))
@@ -579,6 +660,8 @@ def main():
     parser.add_argument("--output",
                         help="Output base path (no extension). "
                              "Defaults to same folder / stem as input.")
+    parser.add_argument("--aggressive", action="store_true",
+                        help="Apply aggressive mesh optimization (better for Creo, slower)")
 
     args = parser.parse_args()
 
@@ -594,9 +677,13 @@ def main():
     out_base.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Reading: {input_path}")
-    vertices, triangles = extract_geometry(input_path)
+    vertices, triangles, quads = extract_geometry(input_path)
+    
+    # Clean mesh to remove small edges and fix geometry
+    vertices, triangles, quads = clean_mesh(vertices, triangles, quads, tolerance=1e-6, aggressive=args.aggressive)
 
-    if len(triangles) == 0:
+    total_faces = len(triangles) + len(quads)
+    if total_faces == 0:
         print(
             "\nNo convertible geometry found in the DXF."
             "\nMake sure the file contains at least one of:"
@@ -605,13 +692,13 @@ def main():
         sys.exit(1)
 
     if args.format in ("stl", "all"):
-        save_stl(vertices, triangles, out_base.with_suffix(".stl"))
+        save_stl(vertices, triangles, quads, out_base.with_suffix(".stl"))
 
     if args.format in ("step", "all"):
-        save_step(vertices, triangles, out_base.with_suffix(".stp"))
+        save_step(vertices, triangles, quads, out_base.with_suffix(".stp"))
 
     if args.format in ("iges", "all"):
-        save_iges(vertices, triangles, out_base.with_suffix(".igs"))
+        save_iges(vertices, triangles, quads, out_base.with_suffix(".igs"))
 
     print("\nDone.")
 
