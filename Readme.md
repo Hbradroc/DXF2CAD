@@ -304,7 +304,8 @@ python dxf_converter.py roof_concept.dxf --format all --output ./exports/roof_v2
 
 | Version | Changes |
 |---|---|
-| **1.1** (Current) | Quad preservation in STEP/IGES; improved face topology |
+| **1.2** (Current) | **Cylinder end cap generation** — POLYMESH cylinders now generate fan-triangulated end caps for closed geometry; new `--normal-tolerance` and `--keep-degenerate` flags for fine-tuned face filtering |
+| 1.1 | Quad preservation in STEP/IGES; improved face topology |
 | 1.0 | Initial release; STEP/IGES/STL export |
 
 ---
