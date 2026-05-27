@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DXF2CAD Converter</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="card">
+        <a class="email-link" href="mailto:hbradroc@uwo.ca" title="Contact">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 5L4 8V6l8 5 8-5v2z"
+            />
+          </svg>
+          hbradroc@uwo.ca
+        </a>
+
+        <h1>DXF2CAD Converter</h1>
+        <p class="sub">
+          Upload a 3D DXF. Conversion runs in your browser (same Python script as the CLI).
+        </p>
+
+        <div class="field">
+          <label for="dxfFile">3D DXF file (.dxf)</label>
+          <input id="dxfFile" type="file" accept=".dxf" />
+        </div>
+
+        <div class="field">
+          <label for="formatSelect">Output format</label>
+          <select id="formatSelect">
+            <option value="iges">IGES (.igs) — NX, legacy CAD</option>
+            <option value="step">STEP (.stp) — Creo, SolidWorks, FreeCAD</option>
+            <option value="stl">STL (.stl) — 3D printing, mesh viewers</option>
+            <option value="all">All three formats</option>
+          </select>
+        </div>
+
+        <div class="options">
+          <label class="check">
+            <input id="aggressive" type="checkbox" />
+            Aggressive mesh optimization
+          </label>
+          <label class="check">
+            <input id="keepDegenerate" type="checkbox" />
+            Keep near-degenerate faces
+          </label>
+        </div>
+
+        <button id="convertBtn" type="button">Convert and download</button>
+
+        <div id="downloads" class="downloads" hidden></div>
+        <pre id="log" class="log" aria-live="polite"></pre>
+      </section>
+    </main>
+
+    <p class="footer-note">Systemair 467</p>
+
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

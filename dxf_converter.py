@@ -343,24 +343,48 @@ def optimize_for_step(vertices: np.ndarray, triangles: list, quads: list, coplan
 # STL export  (numpy-stl)
 # ---------------------------------------------------------------------------
 
+def _triangles_for_stl(triangles: list, quads: list) -> list[tuple[int, int, int]]:
+    all_tris = list(triangles)
+    for q in quads:
+        all_tris.append((q[0], q[1], q[2]))
+        all_tris.append((q[0], q[2], q[3]))
+    return all_tris
+
+
+def _save_stl_binary(vertices: np.ndarray, all_tris: list, output_path: Path) -> None:
+    """Write binary STL without numpy-stl (used in Pyodide / browser)."""
+    import struct
+
+    with open(output_path, "wb") as fh:
+        fh.write(b"\0" * 80)
+        fh.write(struct.pack("<I", len(all_tris)))
+        for a, b, c in all_tris:
+            va, vb, vc = vertices[a], vertices[b], vertices[c]
+            n = np.cross(vb - va, vc - va)
+            norm = np.linalg.norm(n)
+            if norm > 0:
+                n = n / norm
+            else:
+                n = np.array([0.0, 0.0, 0.0])
+            fh.write(struct.pack("<3f", float(n[0]), float(n[1]), float(n[2])))
+            fh.write(struct.pack("<9f", *[float(x) for row in (va, vb, vc) for x in row]))
+            fh.write(struct.pack("<H", 0))
+
+
 def save_stl(vertices: np.ndarray, triangles: list, quads: list, output_path: Path):
+    all_tris = _triangles_for_stl(triangles, quads)
+    if not all_tris:
+        print("Warning: no faces – STL not written.")
+        return
+
     try:
         from stl import mesh as stl_mesh
     except ImportError:
-        sys.exit(
-            "numpy-stl is not installed.\n"
-            "Fix: pip install numpy-stl"
+        _save_stl_binary(vertices, all_tris, output_path)
+        print(
+            f"STL saved -> {output_path}  ({len(all_tris):,} triangles from "
+            f"{len(triangles)} tri + {len(quads)} quad)"
         )
-
-    # Convert quads to triangles for STL export
-    all_tris = list(triangles)
-    for q in quads:
-        # Split each quad into 2 triangles
-        all_tris.append((q[0], q[1], q[2]))
-        all_tris.append((q[0], q[2], q[3]))
-
-    if not all_tris:
-        print("Warning: no faces – STL not written.")
         return
 
     solid = stl_mesh.Mesh(np.zeros(len(all_tris), dtype=stl_mesh.Mesh.dtype))
@@ -787,6 +811,89 @@ def save_iges(vertices: np.ndarray, triangles: list, quads: list, output_path: P
 
 
 # ---------------------------------------------------------------------------
+# Programmatic API (CLI + web app)
+# ---------------------------------------------------------------------------
+
+def convert_dxf(
+    input_path: Path,
+    out_base: Path,
+    fmt: str = "iges",
+    aggressive: bool = False,
+    normal_tolerance: float = 1e-10,
+    keep_degenerate: bool = False,
+) -> dict:
+    """
+    Convert a 3D DXF file to STL, STEP, and/or IGES.
+
+    Parameters
+    ----------
+    input_path : Path
+        Input .dxf file.
+    out_base : Path
+        Output path without extension (e.g. /tmp/model).
+    fmt : str
+        One of "stl", "step", "iges", or "all".
+    aggressive, normal_tolerance, keep_degenerate
+        Same as CLI flags.
+
+    Returns
+    -------
+    dict with keys: vertices, triangles, quads, outputs (list of Path), face_count.
+    """
+    input_path = Path(input_path).resolve()
+    out_base = Path(out_base).resolve()
+    out_base.parent.mkdir(parents=True, exist_ok=True)
+
+    vertices, triangles, quads = extract_geometry(input_path)
+    vertices, triangles, quads = clean_mesh(
+        vertices, triangles, quads, tolerance=1e-6, aggressive=aggressive
+    )
+
+    total_faces = len(triangles) + len(quads)
+    if total_faces == 0:
+        raise ValueError(
+            "No convertible geometry found in the DXF. "
+            "The file must contain 3DFACE, MESH, or POLYLINE (PFACE/POLYMESH)."
+        )
+
+    outputs: list[Path] = []
+    if fmt in ("stl", "all"):
+        path = out_base.with_suffix(".stl")
+        save_stl(vertices, triangles, quads, path)
+        outputs.append(path)
+    if fmt in ("step", "all"):
+        path = out_base.with_suffix(".stp")
+        save_step(
+            vertices,
+            triangles,
+            quads,
+            path,
+            normal_tolerance=normal_tolerance,
+            keep_degenerate=keep_degenerate,
+        )
+        outputs.append(path)
+    if fmt in ("iges", "all"):
+        path = out_base.with_suffix(".igs")
+        save_iges(
+            vertices,
+            triangles,
+            quads,
+            path,
+            normal_tolerance=normal_tolerance,
+            keep_degenerate=keep_degenerate,
+        )
+        outputs.append(path)
+
+    return {
+        "vertices": vertices,
+        "triangles": triangles,
+        "quads": quads,
+        "outputs": outputs,
+        "face_count": total_faces,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -825,30 +932,18 @@ def main():
     out_base.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Reading: {input_path}")
-    vertices, triangles, quads = extract_geometry(input_path)
-    
-    # Clean mesh to remove small edges and fix geometry
-    vertices, triangles, quads = clean_mesh(vertices, triangles, quads, tolerance=1e-6, aggressive=args.aggressive)
-
-    total_faces = len(triangles) + len(quads)
-    if total_faces == 0:
-        print(
-            "\nNo convertible geometry found in the DXF."
-            "\nMake sure the file contains at least one of:"
-            "\n  3DFACE, MESH, POLYLINE (PFACE or POLYMESH)"
+    try:
+        convert_dxf(
+            input_path,
+            out_base,
+            fmt=args.format,
+            aggressive=args.aggressive,
+            normal_tolerance=args.normal_tolerance,
+            keep_degenerate=args.keep_degenerate,
         )
+    except ValueError as exc:
+        print(f"\n{exc}")
         sys.exit(1)
-
-    if args.format in ("stl", "all"):
-        save_stl(vertices, triangles, quads, out_base.with_suffix(".stl"))
-
-    if args.format in ("step", "all"):
-        save_step(vertices, triangles, quads, out_base.with_suffix(".stp"), 
-                  normal_tolerance=args.normal_tolerance, keep_degenerate=args.keep_degenerate)
-
-    if args.format in ("iges", "all"):
-        save_iges(vertices, triangles, quads, out_base.with_suffix(".igs"), 
-                  normal_tolerance=args.normal_tolerance, keep_degenerate=args.keep_degenerate)
 
     print("\nDone.")
 

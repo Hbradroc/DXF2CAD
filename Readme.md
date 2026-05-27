@@ -83,6 +83,35 @@ When a DXF file contains **quad faces** (4-sided polygons), they are preserved a
 
 ---
 
+## Web app (GitHub Pages — same pattern as [dvf2Json](https://hbradroc.github.io/dvf2Json/))
+
+Static site files in the repo root:
+
+| File | Role |
+|------|------|
+| `index.html` | Upload UI |
+| `app.js` | Loads [Pyodide](https://pyodide.org/) and runs `dxf_converter.py` in the browser |
+| `styles.css` | Layout (matches dvf2Json look) |
+| `dxf_converter.py` | Same converter as the CLI |
+
+Nothing is uploaded to a server — conversion runs locally in the browser after the Python runtime loads (~30s first visit).
+
+### Enable GitHub Pages
+
+1. Push `index.html`, `app.js`, `styles.css`, `dxf_converter.py`, `.nojekyll` to **main**.
+2. On GitHub: **Settings → Pages → Build and deployment → Source: Deploy from branch → Branch: `main` / `/ (root)` → Save**.
+3. Open **https://hbradroc.github.io/DXF2CAD/** (repo name sets the path).
+
+### Test locally
+
+```bash
+python -m http.server 8080
+```
+
+Open `http://localhost:8080` (must use a local server so `dxf_converter.py` can be fetched).
+
+---
+
 ## Installation & Setup
 
 ### Prerequisites
@@ -93,8 +122,10 @@ When a DXF file contains **quad faces** (4-sided polygons), they are preserved a
 ### 1. Install Python Packages
 
 ```bash
-pip install ezdxf numpy-stl numpy
+pip install -r requirements.txt
 ```
+
+Or CLI-only (no web UI): `pip install ezdxf numpy-stl numpy`
 
 **What each package does:**
 - `ezdxf` — Parses DXF files and extracts 3D geometry
