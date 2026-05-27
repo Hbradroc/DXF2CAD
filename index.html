@@ -44,10 +44,20 @@
           </select>
         </div>
 
+        <div class="field">
+          <label for="stitchTolerance">T-junction stitch tolerance</label>
+          <select id="stitchTolerance">
+            <option value="coarse">Coarse → Fine (1e-4, 1e-5, 1e-6) — recommended</option>
+            <option value="medium">Medium → Fine (1e-5, 1e-6)</option>
+            <option value="fine">Fine only (1e-6) — original behaviour</option>
+            <option value="tight">Tight only (1e-7) — very precise models</option>
+          </select>
+        </div>
+
         <div class="options">
           <label class="check">
             <input id="aggressive" type="checkbox" />
-            Aggressive mesh optimization
+            Aggressive mesh optimization (also removes duplicate faces)
           </label>
           <label class="check">
             <input id="keepDegenerate" type="checkbox" />

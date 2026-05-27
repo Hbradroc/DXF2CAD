@@ -248,57 +248,158 @@ def extract_geometry(dxf_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Mesh cleaning  (using trimesh)
+# Mesh cleaning — multi-tolerance T-junction stitching
 # ---------------------------------------------------------------------------
 
-def clean_mesh(vertices: np.ndarray, triangles: list, quads: list, tolerance: float = 1e-6, aggressive: bool = False):
+def _merge_vertices_at_tolerance(
+    vertices: np.ndarray,
+    face_list: list[tuple],
+    tolerance: float,
+) -> tuple[np.ndarray, list[tuple]]:
     """
-    Clean the mesh to remove small edges and fix geometry issues.
-    
+    Merge all vertices whose distance is ≤ tolerance using a grid hash.
+    Returns a compacted vertex array and re-indexed faces.
+    Zero-area degenerate faces (all indices the same after merging) are removed.
+    """
+    n = len(vertices)
+    if n == 0:
+        return vertices, face_list
+
+    # Grid hash: quantise each vertex to the nearest cell
+    cell = tolerance if tolerance > 0 else 1e-9
+    keys = np.floor(vertices / cell).astype(np.int64)
+
+    # Build a map from grid cell → representative vertex index
+    # For each vertex, check its own cell and all 26 neighbours so that
+    # vertices straddling a cell boundary still get merged.
+    cell_map: dict[tuple, int] = {}
+    remap = np.arange(n, dtype=np.int64)
+
+    for i in range(n):
+        kx, ky, kz = int(keys[i, 0]), int(keys[i, 1]), int(keys[i, 2])
+        found = -1
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    neighbour = (kx + dx, ky + dy, kz + dz)
+                    if neighbour in cell_map:
+                        rep = cell_map[neighbour]
+                        if np.linalg.norm(vertices[i] - vertices[rep]) <= tolerance:
+                            found = rep
+                            break
+                if found >= 0:
+                    break
+            if found >= 0:
+                break
+        if found >= 0:
+            remap[i] = found
+        else:
+            cell_map[(kx, ky, kz)] = i
+
+    # Compact: build a new vertex array with only the representatives
+    unique_ids = np.unique(remap)
+    new_index = np.empty(n, dtype=np.int64)
+    new_index[unique_ids] = np.arange(len(unique_ids), dtype=np.int64)
+    final_remap = new_index[remap]
+
+    new_verts = vertices[unique_ids]
+
+    # Re-index faces; drop degenerate ones (any two indices equal after merge)
+    new_faces = []
+    for face in face_list:
+        remapped = tuple(int(final_remap[idx]) for idx in face)
+        if len(set(remapped)) == len(face):   # no collapsed edges
+            new_faces.append(remapped)
+
+    return new_verts, new_faces
+
+
+def stitch_mesh(
+    vertices: np.ndarray,
+    triangles: list,
+    quads: list,
+    tolerances: tuple[float, ...] = (1e-4, 1e-5, 1e-6),
+    aggressive: bool = False,
+) -> tuple[np.ndarray, list, list]:
+    """
+    Multi-tolerance T-junction stitching.
+
+    Runs vertex merging at descending tolerances (coarse → fine) so that
+    near-duplicate vertices caused by floating-point drift are collapsed.
+    At each pass only the faces that still exist are carried forward, so
+    overly aggressive merging at a coarse level can't make things worse.
+
     Parameters
     ----------
-    vertices : np.ndarray  shape (N, 3)
-    triangles : list[tuple[int, int, int]]
-    quads : list[tuple[int, int, int, int]]
-    tolerance : float  – merge vertices within this distance
-    aggressive : bool  – if True, apply additional mesh optimization
-    
+    vertices   : shape (N, 3)
+    triangles  : list of (i, j, k)
+    quads      : list of (i, j, k, l)
+    tolerances : sequence of distances in model units (default: 1e-4 → 1e-6 mm)
+    aggressive : if True, also drops duplicate faces after stitching
+
     Returns
     -------
-    vertices : np.ndarray  cleaned vertices
-    triangles : list[tuple[int, int, int]]  cleaned triangle indices
-    quads : list[tuple[int, int, int, int]]  cleaned quad indices
+    vertices, triangles, quads  (cleaned)
     """
-    # Note: When preserving quads, we skip aggressive cleaning to avoid
-    # reindexing issues. The quad structure is already optimal for Creo.
-    total_faces = len(triangles) + len(quads)
-    print(f"\nMesh info: {len(vertices):,} vertices, {total_faces:,} faces ({len(triangles):,} tri, {len(quads):,} quad)")
-    
-    if aggressive and not quads:
-        # Only apply aggressive cleaning if no quads (which we want to preserve)
-        try:
-            import trimesh
-        except ImportError:
-            print("Warning: trimesh not installed. Skipping mesh cleaning.")
-            return vertices, triangles, quads
-        
-        try:
-            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, process=True)
-            print(f"  Applying aggressive optimization...")
-            
-            try:
-                mesh = mesh.simplify(target_reduction=0.05, preserve_border=True)
-                print(f"  Simplified to {len(mesh.faces):,} faces")
-                mesh.merge_vertices()
-                return mesh.vertices, triangles, []
-            except:
-                mesh.merge_vertices()
-                return mesh.vertices, triangles, []
-        except:
-            pass
-    
-    # Return as-is to preserve quad structure
-    return vertices, triangles, quads
+    total_before = len(triangles) + len(quads)
+    verts_before = len(vertices)
+    print(
+        f"\nMesh info: {verts_before:,} vertices, "
+        f"{total_before:,} faces ({len(triangles):,} tri, {len(quads):,} quad)"
+    )
+    print(f"  Stitching T-junctions at tolerances: {tolerances}")
+
+    v = vertices.copy()
+    tris = list(triangles)
+    qs = list(quads)
+
+    for tol in tolerances:
+        if tris:
+            v, tris = _merge_vertices_at_tolerance(v, tris, tol)
+        if qs:
+            v, qs = _merge_vertices_at_tolerance(v, qs, tol)
+
+    if aggressive:
+        # Remove duplicate faces (same sorted index tuple)
+        seen_t: set[tuple] = set()
+        dedup_tris = []
+        for f in tris:
+            key = tuple(sorted(f))
+            if key not in seen_t:
+                seen_t.add(key)
+                dedup_tris.append(f)
+        tris = dedup_tris
+
+        seen_q: set[tuple] = set()
+        dedup_qs = []
+        for f in qs:
+            key = tuple(sorted(f))
+            if key not in seen_q:
+                seen_q.add(key)
+                dedup_qs.append(f)
+        qs = dedup_qs
+
+    total_after = len(tris) + len(qs)
+    verts_after = len(v)
+    merged_v = verts_before - verts_after
+    removed_f = total_before - total_after
+    print(
+        f"  Stitching complete: {verts_after:,} vertices "
+        f"(-{merged_v:,} merged), {total_after:,} faces "
+        f"(-{removed_f:,} degenerate removed)"
+    )
+    return v, tris, qs
+
+
+# Keep the old name as an alias so existing call-sites still work
+def clean_mesh(
+    vertices: np.ndarray,
+    triangles: list,
+    quads: list,
+    tolerance: float = 1e-6,
+    aggressive: bool = False,
+) -> tuple[np.ndarray, list, list]:
+    return stitch_mesh(vertices, triangles, quads, aggressive=aggressive)
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +922,7 @@ def convert_dxf(
     aggressive: bool = False,
     normal_tolerance: float = 1e-10,
     keep_degenerate: bool = False,
+    stitch_tolerances: tuple[float, ...] = (1e-4, 1e-5, 1e-6),
 ) -> dict:
     """
     Convert a 3D DXF file to STL, STEP, and/or IGES.
@@ -835,6 +937,10 @@ def convert_dxf(
         One of "stl", "step", "iges", or "all".
     aggressive, normal_tolerance, keep_degenerate
         Same as CLI flags.
+    stitch_tolerances : tuple of floats
+        Vertex merge distances applied coarse-to-fine (model units, usually mm).
+        Default (1e-4, 1e-5, 1e-6) closes most T-junction seams.
+        Pass (1e-6,) to use only the tightest pass (old behaviour).
 
     Returns
     -------
@@ -845,8 +951,10 @@ def convert_dxf(
     out_base.parent.mkdir(parents=True, exist_ok=True)
 
     vertices, triangles, quads = extract_geometry(input_path)
-    vertices, triangles, quads = clean_mesh(
-        vertices, triangles, quads, tolerance=1e-6, aggressive=aggressive
+    vertices, triangles, quads = stitch_mesh(
+        vertices, triangles, quads,
+        tolerances=stitch_tolerances,
+        aggressive=aggressive,
     )
 
     total_faces = len(triangles) + len(quads)
@@ -917,6 +1025,18 @@ def main():
                         help="Minimum normal length to accept a face (default: 1e-10). Increase to skip tiny faces.")
     parser.add_argument("--keep-degenerate", action="store_true",
                         help="Keep near-degenerate faces (may help with cylinder gaps)")
+    parser.add_argument(
+        "--stitch-tolerance",
+        type=float,
+        nargs="+",
+        default=[1e-4, 1e-5, 1e-6],
+        metavar="TOL",
+        help=(
+            "One or more vertex-merge distances (coarse → fine, in model units). "
+            "Default: 1e-4 1e-5 1e-6. "
+            "Use a single tight value (e.g. 1e-6) to replicate old behaviour."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -940,6 +1060,7 @@ def main():
             aggressive=args.aggressive,
             normal_tolerance=args.normal_tolerance,
             keep_degenerate=args.keep_degenerate,
+            stitch_tolerances=tuple(args.stitch_tolerance),
         )
     except ValueError as exc:
         print(f"\n{exc}")

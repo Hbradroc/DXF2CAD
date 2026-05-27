@@ -9,6 +9,14 @@ const dxfInput = document.getElementById("dxfFile");
 const formatSelect = document.getElementById("formatSelect");
 const aggressiveInput = document.getElementById("aggressive");
 const keepDegenerateInput = document.getElementById("keepDegenerate");
+const stitchToleranceInput = document.getElementById("stitchTolerance");
+
+const STITCH_MAP = {
+  coarse: [1e-4, 1e-5, 1e-6],
+  medium: [1e-5, 1e-6],
+  fine:   [1e-6],
+  tight:  [1e-7],
+};
 const convertBtn = document.getElementById("convertBtn");
 const logEl = document.getElementById("log");
 const downloadsEl = document.getElementById("downloads");
@@ -106,6 +114,7 @@ convertBtn.addEventListener("click", async () => {
   const fmt = formatSelect.value;
   const aggressive = aggressiveInput.checked;
   const keepDegenerate = keepDegenerateInput.checked;
+  const stitchTolerances = STITCH_MAP[stitchToleranceInput.value] ?? STITCH_MAP.coarse;
   const stem = stemFromFilename(file.name);
 
   convertBtn.disabled = true;
@@ -129,6 +138,7 @@ convertBtn.addEventListener("click", async () => {
     py.globals.set("fmt", fmt);
     py.globals.set("aggressive", aggressive);
     py.globals.set("keep_degenerate", keepDegenerate);
+    py.globals.set("stitch_tolerances", py.toPy(stitchTolerances));
 
     log(`Converting ${file.name} → ${fmt}...`);
 
@@ -142,6 +152,7 @@ result = dxf_converter.convert_dxf(
     fmt=fmt,
     aggressive=aggressive,
     keep_degenerate=keep_degenerate,
+    stitch_tolerances=tuple(stitch_tolerances),
 )
 output_paths = [str(p) for p in result["outputs"]]
 face_count = result["face_count"]
