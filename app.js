@@ -2,7 +2,11 @@
  * DXF2CAD — runs dxf_converter.py in the browser via Pyodide (GitHub Pages).
  */
 
-const PYODIDE_URL = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
+// Official Pyodide CDN first; jsdelivr as fallback (some corporate networks block one or the other)
+const PYODIDE_CDNS = [
+  "https://cdn.pyodide.org/v0.26.4/full/",
+  "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/",
+];
 const CONVERTER_PATH = "./dxf_converter.py";
 
 const dxfInput = document.getElementById("dxfFile");
@@ -59,8 +63,12 @@ async function ensureRuntime() {
   }
 
   runtimePromise = (async () => {
+    // loadPyodide is already available (injected by the CDN script tag in index.html)
+    // indexURL must match whichever CDN actually loaded
+    const loadedSrc = document.querySelector("script[src*='pyodide.js']")?.src || "";
+    const indexURL = loadedSrc ? loadedSrc.replace("pyodide.js", "") : PYODIDE_CDNS[0];
     log("Loading Python runtime (first visit may take ~30s)...");
-    pyodide = await loadPyodide({ indexURL: PYODIDE_URL });
+    pyodide = await loadPyodide({ indexURL });
 
     await pyodide.loadPackage("micropip");
     log("Installing ezdxf (and dependencies)...");

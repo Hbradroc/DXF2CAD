@@ -74,7 +74,34 @@
 
     <p class="footer-note">Systemair 467</p>
 
-    <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
-    <script type="module" src="./app.js"></script>
+    <script>
+      // Try official Pyodide CDN first, fall back to jsdelivr
+      (function () {
+        const cdns = [
+          "https://cdn.pyodide.org/v0.26.4/full/pyodide.js",
+          "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js",
+        ];
+        let idx = 0;
+        function tryNext() {
+          if (idx >= cdns.length) {
+            document.getElementById("log").textContent =
+              "Could not load Python runtime: all CDN sources are blocked on this network. " +
+              "Please use a VPN or open the tool from a different network.";
+            return;
+          }
+          const s = document.createElement("script");
+          s.src = cdns[idx++];
+          s.onload = function () {
+            const m = document.createElement("script");
+            m.type = "module";
+            m.src = "./app.js";
+            document.body.appendChild(m);
+          };
+          s.onerror = tryNext;
+          document.body.appendChild(s);
+        }
+        tryNext();
+      })();
+    </script>
   </body>
 </html>

@@ -253,25 +253,26 @@ def extract_geometry(dxf_path: Path):
 
 def _merge_vertices_at_tolerance(
     vertices: np.ndarray,
-    face_list: list[tuple],
+    triangles: list[tuple],
+    quads: list[tuple],
     tolerance: float,
-) -> tuple[np.ndarray, list[tuple]]:
+) -> tuple[np.ndarray, list[tuple], list[tuple]]:
     """
     Merge all vertices whose distance is ≤ tolerance using a grid hash.
-    Returns a compacted vertex array and re-indexed faces.
-    Zero-area degenerate faces (all indices the same after merging) are removed.
+
+    Triangles and quads are processed together so they share the same
+    compacted vertex array — avoids index-out-of-bounds when one list
+    references vertices not present in the other.
+
+    Zero-area degenerate faces (collapsed edges after merging) are dropped.
     """
     n = len(vertices)
     if n == 0:
-        return vertices, face_list
+        return vertices, triangles, quads
 
-    # Grid hash: quantise each vertex to the nearest cell
     cell = tolerance if tolerance > 0 else 1e-9
     keys = np.floor(vertices / cell).astype(np.int64)
 
-    # Build a map from grid cell → representative vertex index
-    # For each vertex, check its own cell and all 26 neighbours so that
-    # vertices straddling a cell boundary still get merged.
     cell_map: dict[tuple, int] = {}
     remap = np.arange(n, dtype=np.int64)
 
@@ -296,22 +297,26 @@ def _merge_vertices_at_tolerance(
         else:
             cell_map[(kx, ky, kz)] = i
 
-    # Compact: build a new vertex array with only the representatives
+    # Compact vertex array using all representatives referenced by either list
     unique_ids = np.unique(remap)
     new_index = np.empty(n, dtype=np.int64)
     new_index[unique_ids] = np.arange(len(unique_ids), dtype=np.int64)
-    final_remap = new_index[remap]
+    final_remap = new_index[remap]  # shape (n,) — safe for any original index
 
     new_verts = vertices[unique_ids]
 
-    # Re-index faces; drop degenerate ones (any two indices equal after merge)
-    new_faces = []
-    for face in face_list:
-        remapped = tuple(int(final_remap[idx]) for idx in face)
-        if len(set(remapped)) == len(face):   # no collapsed edges
-            new_faces.append(remapped)
+    def _remap_faces(face_list: list[tuple], arity: int) -> list[tuple]:
+        out = []
+        for face in face_list:
+            remapped = tuple(int(final_remap[idx]) for idx in face)
+            if len(set(remapped)) == arity:   # drop collapsed edges
+                out.append(remapped)
+        return out
 
-    return new_verts, new_faces
+    new_tris = _remap_faces(triangles, 3)
+    new_qs   = _remap_faces(quads, 4)
+
+    return new_verts, new_tris, new_qs
 
 
 def stitch_mesh(
@@ -326,8 +331,8 @@ def stitch_mesh(
 
     Runs vertex merging at descending tolerances (coarse → fine) so that
     near-duplicate vertices caused by floating-point drift are collapsed.
-    At each pass only the faces that still exist are carried forward, so
-    overly aggressive merging at a coarse level can't make things worse.
+    Triangles and quads are always merged together so their shared vertex
+    pool stays consistent.
 
     Parameters
     ----------
@@ -354,10 +359,7 @@ def stitch_mesh(
     qs = list(quads)
 
     for tol in tolerances:
-        if tris:
-            v, tris = _merge_vertices_at_tolerance(v, tris, tol)
-        if qs:
-            v, qs = _merge_vertices_at_tolerance(v, qs, tol)
+        v, tris, qs = _merge_vertices_at_tolerance(v, tris, qs, tol)
 
     if aggressive:
         # Remove duplicate faces (same sorted index tuple)
