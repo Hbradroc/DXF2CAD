@@ -79,23 +79,31 @@
     <p class="footer-note">Systemair 467</p>
 
     <script>
-      // Try official Pyodide CDN first, fall back to jsdelivr
+      // Load pyodide.js from whichever CDN responds first, then store the
+      // working base URL so app.js can pass it to loadPyodide().
+      // Note: pyodide.js (tiny) and the runtime files (pyodide.asm.js, etc.)
+      // may be blocked separately on corporate networks, so app.js retries
+      // loadPyodide() with each base URL independently.
+      window.__pyodideIndexURL = null;
       (function () {
-        const cdns = [
-          "https://cdn.pyodide.org/v0.26.4/full/pyodide.js",
-          "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js",
+        const bases = [
+          "https://cdn.pyodide.org/v0.26.4/full/",
+          "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/",
         ];
         let idx = 0;
         function tryNext() {
-          if (idx >= cdns.length) {
+          if (idx >= bases.length) {
             document.getElementById("log").textContent =
-              "Could not load Python runtime: all CDN sources are blocked on this network. " +
-              "Please use a VPN or open the tool from a different network.";
+              "Could not load pyodide.js from any CDN.\n" +
+              "Both cdn.pyodide.org and cdn.jsdelivr.net appear blocked on this network.\n" +
+              "Try opening the page on a different network or via VPN.";
             return;
           }
+          const base = bases[idx++];
           const s = document.createElement("script");
-          s.src = cdns[idx++];
+          s.src = base + "pyodide.js";
           s.onload = function () {
+            window.__pyodideIndexURL = base;
             const m = document.createElement("script");
             m.type = "module";
             m.src = "./app.js";

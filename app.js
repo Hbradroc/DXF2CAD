@@ -64,12 +64,40 @@ async function ensureRuntime() {
   }
 
   runtimePromise = (async () => {
-    // loadPyodide is already available (injected by the CDN script tag in index.html)
-    // indexURL must match whichever CDN actually loaded
-    const loadedSrc = document.querySelector("script[src*='pyodide.js']")?.src || "";
-    const indexURL = loadedSrc ? loadedSrc.replace("pyodide.js", "") : PYODIDE_CDNS[0];
     log("Loading Python runtime (first visit may take ~30s)...");
-    pyodide = await loadPyodide({ indexURL });
+
+    // pyodide.js (small) and the runtime files (pyodide.asm.js, python_stdlib.zip,
+    // etc.) can be blocked independently on corporate networks.
+    // Try loadPyodide() with each CDN base in order, starting with whichever
+    // CDN successfully delivered pyodide.js, then the others as fallback.
+    const detectedBase = window.__pyodideIndexURL;
+    const basesToTry = detectedBase
+      ? [detectedBase, ...PYODIDE_CDNS.filter((b) => b !== detectedBase)]
+      : PYODIDE_CDNS;
+
+    let lastErr = null;
+    for (const base of basesToTry) {
+      try {
+        const host = new URL(base).hostname;
+        log(`Trying runtime from ${host}…`);
+        pyodide = await loadPyodide({ indexURL: base });
+        log(`Runtime loaded from ${host}.`);
+        break;
+      } catch (e) {
+        lastErr = e;
+        log(`  blocked or failed: ${e.message?.split("\n")[0] ?? e}`);
+        pyodide = null;
+      }
+    }
+
+    if (!pyodide) {
+      throw new Error(
+        "Python runtime could not be loaded from any CDN.\n" +
+        "Both cdn.pyodide.org and cdn.jsdelivr.net are blocked on this network.\n" +
+        "Open the tool via VPN or from a different network.\n" +
+        `Last error: ${lastErr?.message ?? lastErr}`
+      );
+    }
 
     await pyodide.loadPackage("micropip");
     log("Installing ezdxf (and dependencies)...");
