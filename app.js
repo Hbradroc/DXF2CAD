@@ -11,6 +11,7 @@ const CONVERTER_PATH = "./dxf_converter.py";
 
 const dxfInput = document.getElementById("dxfFile");
 const formatSelect = document.getElementById("formatSelect");
+const assemblyInput = document.getElementById("assembly");
 const aggressiveInput = document.getElementById("aggressive");
 const keepDegenerateInput = document.getElementById("keepDegenerate");
 const stitchToleranceInput = document.getElementById("stitchTolerance");
@@ -120,6 +121,7 @@ convertBtn.addEventListener("click", async () => {
   }
 
   const fmt = formatSelect.value;
+  const assembly = assemblyInput.checked;
   const aggressive = aggressiveInput.checked;
   const keepDegenerate = keepDegenerateInput.checked;
   const stitchTolerances = STITCH_MAP[stitchToleranceInput.value] ?? STITCH_MAP.coarse;
@@ -144,6 +146,7 @@ convertBtn.addEventListener("click", async () => {
     py.globals.set("input_path", inputPath);
     py.globals.set("out_base", outBase);
     py.globals.set("fmt", fmt);
+    py.globals.set("assembly", assembly);
     py.globals.set("aggressive", aggressive);
     py.globals.set("keep_degenerate", keepDegenerate);
     py.globals.set("stitch_tolerances", py.toPy(stitchTolerances));
@@ -158,6 +161,7 @@ result = dxf_converter.convert_dxf(
     Path(input_path),
     Path(out_base),
     fmt=fmt,
+    assembly=assembly,
     aggressive=aggressive,
     keep_degenerate=keep_degenerate,
     stitch_tolerances=tuple(stitch_tolerances),

@@ -443,6 +443,121 @@ def optimize_for_step(vertices: np.ndarray, triangles: list, quads: list, coplan
 
 
 # ---------------------------------------------------------------------------
+# Connected-component splitting  (for assembly export)
+# ---------------------------------------------------------------------------
+
+def find_connected_components(
+    vertices: np.ndarray,
+    triangles: list,
+    quads: list,
+    min_faces: int = 1,
+) -> list[dict]:
+    """
+    Split the mesh into connected components by shared vertex indices.
+
+    Two faces are in the same component when they share at least one vertex.
+    After stitch_mesh() the vertex array is already compacted, so shared
+    indices correspond to physically touching / stitched faces.
+
+    Parameters
+    ----------
+    vertices   : compacted vertex array from stitch_mesh
+    triangles  : re-indexed triangle list
+    quads      : re-indexed quad list
+    min_faces  : drop components with fewer faces (default 1 = keep all)
+
+    Returns
+    -------
+    List of dicts (sorted largest first), each containing:
+        vertices  : np.ndarray  (local, re-indexed)
+        triangles : list of (i,j,k)
+        quads     : list of (i,j,k,l)
+        face_count: int
+        label     : str  e.g. "Part_001"
+    """
+    from collections import defaultdict
+
+    all_faces = [(f, 'tri') for f in triangles] + [(f, 'quad') for f in quads]
+    n_faces = len(all_faces)
+    if n_faces == 0:
+        return []
+
+    # Union-Find
+    parent = list(range(n_faces))
+    rank   = [0] * n_faces
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        a, b = find(a), find(b)
+        if a == b:
+            return
+        if rank[a] < rank[b]:
+            a, b = b, a
+        parent[b] = a
+        if rank[a] == rank[b]:
+            rank[a] += 1
+
+    # vertex → list of face indices
+    vert_faces: dict[int, list[int]] = defaultdict(list)
+    for fi, (face, _) in enumerate(all_faces):
+        for vi in face:
+            vert_faces[vi].append(fi)
+
+    for fi_list in vert_faces.values():
+        for k in range(1, len(fi_list)):
+            union(fi_list[0], fi_list[k])
+
+    # Group faces by component root
+    comp_faces: dict[int, list[int]] = defaultdict(list)
+    for fi in range(n_faces):
+        comp_faces[find(fi)].append(fi)
+
+    # Build per-component sub-meshes
+    results = []
+    for face_indices in sorted(comp_faces.values(), key=lambda x: -len(x)):
+        if len(face_indices) < min_faces:
+            continue
+
+        used: set[int] = set()
+        for fi in face_indices:
+            used.update(all_faces[fi][0])
+
+        sorted_used = sorted(used)
+        old_to_new  = {old: new for new, old in enumerate(sorted_used)}
+        sub_verts   = vertices[sorted_used]
+        sub_tris    = [
+            tuple(old_to_new[v] for v in all_faces[fi][0])
+            for fi in face_indices if all_faces[fi][1] == 'tri'
+        ]
+        sub_quads   = [
+            tuple(old_to_new[v] for v in all_faces[fi][0])
+            for fi in face_indices if all_faces[fi][1] == 'quad'
+        ]
+        results.append({
+            'vertices':   sub_verts,
+            'triangles':  sub_tris,
+            'quads':      sub_quads,
+            'face_count': len(face_indices),
+            'label':      '',   # filled in below
+        })
+
+    n_digits = max(3, len(str(len(results))))
+    for i, comp in enumerate(results):
+        comp['label'] = f"Part_{str(i + 1).zfill(n_digits)}"
+
+    print(
+        f"  Connected components: {len(results)} "
+        f"(largest: {results[0]['face_count'] if results else 0} faces)"
+    )
+    return results
+
+
+# ---------------------------------------------------------------------------
 # STL export  (numpy-stl)
 # ---------------------------------------------------------------------------
 
@@ -707,6 +822,239 @@ def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: P
     print(f"STEP saved -> {output_path}  ({len(face_ids):,} faces ({len(triangles)} tri, {len(quads)} quad), {size_mb:.1f} MB)")
 
 
+# ---------------------------------------------------------------------------
+# STEP AP214 assembly writer
+# ---------------------------------------------------------------------------
+
+def save_step_assembly(
+    components: list[dict],
+    output_path: Path,
+    assembly_name: str = "Assembly",
+    normal_tolerance: float = 1e-10,
+    keep_degenerate: bool = False,
+) -> None:
+    """
+    Write a STEP AP214 file with a proper assembly hierarchy.
+
+    Each entry in *components* (from find_connected_components) becomes a
+    separate PRODUCT sub-part.  A top-level PRODUCT links all sub-parts via
+    NEXT_ASSEMBLY_USAGE_OCCURRENCE so Creo / NX / SolidWorks import it as an
+    assembly, not a single part.
+
+    Parameters
+    ----------
+    components     : output of find_connected_components()
+    output_path    : .stp file path
+    assembly_name  : name written into the top-level PRODUCT entity
+    normal_tolerance, keep_degenerate : same as save_step()
+    """
+    if not components:
+        print("Warning: no components – assembly STEP not written.")
+        return
+
+    print(
+        f"Building STEP assembly from {len(components)} components "
+        f"({sum(c['face_count'] for c in components):,} total faces) …"
+    )
+
+    lines: list[str] = []
+    _id = 0
+
+    def emit(s: str) -> int:
+        nonlocal _id
+        _id += 1
+        lines.append(f"#{_id} = {s};")
+        return _id
+
+    # ------------------------------------------------------------------
+    # Shared global context (written once, referenced by every product)
+    # ------------------------------------------------------------------
+    app_ctx  = emit("APPLICATION_CONTEXT('automotive design')")
+    emit(
+        f"APPLICATION_PROTOCOL_DEFINITION("
+        f"'draft international standard','automotive_design',1998,#{app_ctx})"
+    )
+    prod_ctx = emit(f"PRODUCT_CONTEXT('',#{app_ctx},'mechanical')")
+    pd_ctx   = emit(f"PRODUCT_DEFINITION_CONTEXT('part definition',#{app_ctx},'design')")
+
+    unc_meas = emit(
+        "UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#%UNIT%,"
+        "'distance_accuracy_value','')"
+    )
+    si_unit  = emit("(SI_UNIT($,.METRE.))")
+    si_angle = emit("(SI_UNIT($,.RADIAN.))")
+    si_ster  = emit("(SI_UNIT($,.STERADIAN.))")
+    rep_ctx  = emit(
+        f"(GEOMETRIC_REPRESENTATION_CONTEXT(3) "
+        f"GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{unc_meas})) "
+        f"GLOBAL_UNIT_ASSIGNED_CONTEXT((#{si_unit},#{si_angle},#{si_ster})) "
+        f"REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY'))"
+    )
+    lines[unc_meas - 1] = lines[unc_meas - 1].replace('%UNIT%', str(si_unit))
+
+    # ------------------------------------------------------------------
+    # Helper: write one ADVANCED_FACE; returns entity id or None
+    # ------------------------------------------------------------------
+    total_skipped = 0
+
+    def create_face(pts) -> int | None:
+        nonlocal total_skipped
+
+        if len(pts) < 3:
+            total_skipped += 1
+            return None
+
+        p1, p2, p3 = pts[0], pts[1], pts[2]
+        normal = np.cross(p2 - p1, p3 - p1)
+        nlen   = float(np.linalg.norm(normal))
+
+        if nlen < normal_tolerance:
+            if not keep_degenerate or nlen < 1e-15:
+                total_skipped += 1
+                return None
+
+        normal = normal / nlen if nlen > 0 else normal
+
+        def fmt(v):
+            return f"({float(v[0]):.8f},{float(v[1]):.8f},{float(v[2]):.8f})"
+
+        cp_ids, vp_ids = [], []
+        for pt in pts:
+            cp = emit(f"CARTESIAN_POINT('',{fmt(pt)})")
+            vp = emit(f"VERTEX_POINT('',#{cp})")
+            cp_ids.append(cp)
+            vp_ids.append(vp)
+
+        oe_ids = []
+        for i in range(len(pts)):
+            j   = (i + 1) % len(pts)
+            d   = pts[j] - pts[i]
+            dn  = float(np.linalg.norm(d))
+            d   = d / dn if dn > 1e-12 else np.array([1.0, 0.0, 0.0])
+            dir_id = emit(f"DIRECTION('',{fmt(d)})")
+            vec_id = emit(f"VECTOR('',#{dir_id},1.)")
+            lin_id = emit(f"LINE('',#{cp_ids[i]},#{vec_id})")
+            ec_id  = emit(f"EDGE_CURVE('',#{vp_ids[i]},#{vp_ids[j]},#{lin_id},.T.)")
+            oe_ids.append(emit(f"ORIENTED_EDGE('',*,*,#{ec_id},.T.)"))
+
+        el  = emit(f"EDGE_LOOP('',({','.join(f'#{o}' for o in oe_ids)}))")
+        fob = emit(f"FACE_OUTER_BOUND('',#{el},.T.)")
+
+        ref = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        ref = ref - np.dot(ref, normal) * normal
+        rn  = float(np.linalg.norm(ref))
+        ref = ref / (rn if rn > 1e-12 else 1.0)
+
+        nd  = emit(f"DIRECTION('',{fmt(normal)})")
+        rd  = emit(f"DIRECTION('',{fmt(ref)})")
+        ax  = emit(f"AXIS2_PLACEMENT_3D('',#{cp_ids[0]},#{nd},#{rd})")
+        pl  = emit(f"PLANE('',#{ax})")
+        return emit(f"ADVANCED_FACE('',(#{fob}),#{pl},.T.)")
+
+    # ------------------------------------------------------------------
+    # Write one STEP product per component; collect product_def ids
+    # ------------------------------------------------------------------
+    component_pd_ids: list[int] = []
+    component_product_ids: list[int] = []
+
+    for comp in components:
+        label    = comp['label']
+        verts    = comp['vertices']
+        tris     = comp['triangles']
+        qs       = comp['quads']
+
+        product  = emit(f"PRODUCT('{label}','{label}','',(#{prod_ctx}))")
+        pdf      = emit(f"PRODUCT_DEFINITION_FORMATION('','',#{product})")
+        prod_def = emit(f"PRODUCT_DEFINITION('design','',#{pdf},#{pd_ctx})")
+        pd_shape = emit(f"PRODUCT_DEFINITION_SHAPE('','',#{prod_def})")
+
+        face_ids: list[int] = []
+        for ia, ib, ic in tris:
+            fid = create_face([verts[ia], verts[ib], verts[ic]])
+            if fid:
+                face_ids.append(fid)
+        for ia, ib, ic, id_ in qs:
+            fid = create_face([verts[ia], verts[ib], verts[ic], verts[id_]])
+            if fid:
+                face_ids.append(fid)
+
+        if not face_ids:
+            # component had only degenerate faces — skip linkage
+            component_pd_ids.append(None)
+            component_product_ids.append(None)
+            continue
+
+        shell = emit(f"OPEN_SHELL('',({','.join(f'#{f}' for f in face_ids)}))")
+        sbsm  = emit(f"SHELL_BASED_SURFACE_MODEL('',(#{shell}))")
+        grep  = emit(
+            f"GEOMETRICALLY_BOUNDED_SURFACE_SHAPE_REPRESENTATION("
+            f"'',(#{sbsm}),#{rep_ctx})"
+        )
+        emit(f"SHAPE_DEFINITION_REPRESENTATION(#{pd_shape},#{grep})")
+
+        component_pd_ids.append(prod_def)
+        component_product_ids.append(product)
+
+    # ------------------------------------------------------------------
+    # Top-level assembly product
+    # ------------------------------------------------------------------
+    assy_product  = emit(f"PRODUCT('{assembly_name}','{assembly_name}','',(#{prod_ctx}))")
+    assy_pdf      = emit(f"PRODUCT_DEFINITION_FORMATION('','',#{assy_product})")
+    assy_pd       = emit(f"PRODUCT_DEFINITION('design','',#{assy_pdf},#{pd_ctx})")
+    assy_pd_shape = emit(f"PRODUCT_DEFINITION_SHAPE('','',#{assy_pd})")
+    # Empty shape representation for the assembly level
+    assy_sr       = emit(f"SHAPE_REPRESENTATION('',(#{rep_ctx}),#{rep_ctx})")
+    emit(f"SHAPE_DEFINITION_REPRESENTATION(#{assy_pd_shape},#{assy_sr})")
+
+    # ------------------------------------------------------------------
+    # Assembly links: NEXT_ASSEMBLY_USAGE_OCCURRENCE per component
+    # ------------------------------------------------------------------
+    usage_idx = 1
+    for comp_pd, comp_prod in zip(component_pd_ids, component_product_ids):
+        if comp_pd is None:
+            continue
+        nauo = emit(
+            f"NEXT_ASSEMBLY_USAGE_OCCURRENCE("
+            f"'{usage_idx}','{usage_idx}','',#{assy_pd},#{comp_pd},$)"
+        )
+        emit(f"PRODUCT_RELATED_PRODUCT_CATEGORY('part',$,(#{comp_prod}))")
+        usage_idx += 1
+
+    # ------------------------------------------------------------------
+    # Write file
+    # ------------------------------------------------------------------
+    now  = "2026-03-06T00:00:00"
+    stem = output_path.stem
+
+    header = (
+        "ISO-10303-21;\n"
+        "HEADER;\n"
+        f"FILE_DESCRIPTION(('STEP AP214 Assembly generated by dxf_converter.py'),'2;1');\n"
+        f"FILE_NAME('{stem}','{now}',(''),(''),'dxf_converter.py','','');\n"
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\n"
+        "ENDSEC;\n"
+        "DATA;\n"
+    )
+    footer = "ENDSEC;\nEND-ISO-10303-21;\n"
+
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write(header)
+        fh.write("\n".join(lines))
+        fh.write("\n")
+        fh.write(footer)
+
+    size_mb = output_path.stat().st_size / 1_048_576
+    valid_comps = sum(1 for x in component_pd_ids if x is not None)
+    if total_skipped:
+        print(f"  ({total_skipped} degenerate faces skipped)")
+    print(
+        f"STEP assembly saved -> {output_path}  "
+        f"({valid_comps} components, "
+        f"{sum(c['face_count'] for c in components):,} total faces, "
+        f"{size_mb:.1f} MB)"
+    )
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -925,6 +1273,8 @@ def convert_dxf(
     normal_tolerance: float = 1e-10,
     keep_degenerate: bool = False,
     stitch_tolerances: tuple[float, ...] = (1e-4, 1e-5, 1e-6),
+    assembly: bool = False,
+    min_component_faces: int = 1,
 ) -> dict:
     """
     Convert a 3D DXF file to STL, STEP, and/or IGES.
@@ -943,10 +1293,17 @@ def convert_dxf(
         Vertex merge distances applied coarse-to-fine (model units, usually mm).
         Default (1e-4, 1e-5, 1e-6) closes most T-junction seams.
         Pass (1e-6,) to use only the tightest pass (old behaviour).
+    assembly : bool
+        If True and fmt includes "step", write a STEP assembly (.stp) split by
+        connected components in addition to (or instead of) the flat STEP part.
+        Produces a file named <out_base>_assembly.stp.
+    min_component_faces : int
+        Discard components with fewer faces than this threshold (default 1).
 
     Returns
     -------
-    dict with keys: vertices, triangles, quads, outputs (list of Path), face_count.
+    dict with keys: vertices, triangles, quads, outputs (list of Path), face_count,
+                    components (list of component dicts, or [] if assembly=False).
     """
     input_path = Path(input_path).resolve()
     out_base = Path(out_base).resolve()
@@ -994,12 +1351,30 @@ def convert_dxf(
         )
         outputs.append(path)
 
+    # Assembly STEP (always produces a separate _assembly.stp file)
+    components: list[dict] = []
+    if assembly and fmt in ("step", "all", "iges"):
+        print("\nBuilding connected-component assembly …")
+        components = find_connected_components(
+            vertices, triangles, quads, min_faces=min_component_faces
+        )
+        assy_path = out_base.parent / (out_base.name + "_assembly.stp")
+        save_step_assembly(
+            components,
+            assy_path,
+            assembly_name=out_base.stem,
+            normal_tolerance=normal_tolerance,
+            keep_degenerate=keep_degenerate,
+        )
+        outputs.append(assy_path)
+
     return {
         "vertices": vertices,
         "triangles": triangles,
         "quads": quads,
         "outputs": outputs,
         "face_count": total_faces,
+        "components": components,
     }
 
 
@@ -1039,6 +1414,22 @@ def main():
             "Use a single tight value (e.g. 1e-6) to replicate old behaviour."
         ),
     )
+    parser.add_argument(
+        "--assembly",
+        action="store_true",
+        help=(
+            "Also write a STEP assembly file (<output>_assembly.stp) where each "
+            "spatially connected group of faces becomes a separate sub-part. "
+            "Imports into Creo / NX / SolidWorks as a proper assembly."
+        ),
+    )
+    parser.add_argument(
+        "--min-component-faces",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Discard assembly components with fewer than N faces (default: 1).",
+    )
 
     args = parser.parse_args()
 
@@ -1063,6 +1454,8 @@ def main():
             normal_tolerance=args.normal_tolerance,
             keep_degenerate=args.keep_degenerate,
             stitch_tolerances=tuple(args.stitch_tolerance),
+            assembly=args.assembly,
+            min_component_faces=args.min_component_faces,
         )
     except ValueError as exc:
         print(f"\n{exc}")
