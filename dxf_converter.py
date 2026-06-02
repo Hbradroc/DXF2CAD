@@ -37,6 +37,10 @@ from pathlib import Path
 
 import numpy as np
 
+# STEP AP214 length unit — coordinates are kept in DXF drawing units (typically mm).
+STEP_LENGTH_UNIT = "(SI_UNIT(.MILLI.,.METRE.))"
+
+
 
 # ---------------------------------------------------------------------------
 # Geometry extraction
@@ -661,7 +665,7 @@ def save_step(vertices: np.ndarray, triangles: list, quads: list, output_path: P
 
     # Units / uncertainty
     unc_meas  = emit("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#%UNIT%,'distance_accuracy_value','')")
-    si_unit   = emit("(SI_UNIT($,.METRE.))")
+    si_unit   = emit(STEP_LENGTH_UNIT)
     si_angle  = emit("(SI_UNIT($,.RADIAN.))")
     si_ster   = emit("(SI_UNIT($,.STERADIAN.))")
     rep_ctx   = emit(
@@ -881,7 +885,7 @@ def save_step_assembly(
         "UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#%UNIT%,"
         "'distance_accuracy_value','')"
     )
-    si_unit  = emit("(SI_UNIT($,.METRE.))")
+    si_unit  = emit(STEP_LENGTH_UNIT)
     si_angle = emit("(SI_UNIT($,.RADIAN.))")
     si_ster  = emit("(SI_UNIT($,.STERADIAN.))")
     rep_ctx  = emit(

@@ -244,7 +244,8 @@ The IGES format has no assembly structure — use the `_assembly.stp` file and i
 ### STEP Part Implementation
 - Standard: ISO 10303-21, AP214 (Automotive Design)
 - Each face → `ADVANCED_FACE` on `PLANE` in a single `OPEN_SHELL`
-- Precision: 1E-07 mm
+- Precision: 1E-07 mm uncertainty measure
+- **Units:** Millimetres (`SI_UNIT(.MILLI.,.METRE.)`) — matches typical DXF `$INSUNITS=4`
 
 ### STEP Assembly Implementation
 - Same AP214 standard
